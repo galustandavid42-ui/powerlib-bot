@@ -65,6 +65,44 @@ def init_db():
             conn.execute("ALTER TABLE videos ADD COLUMN keywords TEXT DEFAULT ''")
 
 
+def init_db():
+    with db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS videos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                category TEXT NOT NULL,
+                duration TEXT DEFAULT '',
+                link TEXT NOT NULL DEFAULT '',
+                keywords TEXT DEFAULT ''
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS favorites (
+                user_id INTEGER NOT NULL,
+                video_id INTEGER NOT NULL,
+                UNIQUE(user_id, video_id)
+            )
+        """)
+
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(videos)").fetchall()
+        }
+
+        if "link" not in columns:
+            conn.execute(
+                "ALTER TABLE videos ADD COLUMN link TEXT NOT NULL DEFAULT ''"
+            )
+
+        if "keywords" not in columns:
+            conn.execute(
+                "ALTER TABLE videos ADD COLUMN keywords TEXT DEFAULT ''"
+            )
+
+
 def is_admin(user_id):
     return ADMIN_ID and str(user_id) == ADMIN_ID
 
