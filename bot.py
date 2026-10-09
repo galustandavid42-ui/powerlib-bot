@@ -1,7 +1,9 @@
 
 import os
+import re
 import sqlite3
 import logging
+from urllib.request import Request, urlopen
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -69,7 +71,6 @@ def init_db():
             ).fetchall()
         }
 
-        # Обновляем старую базу, не удаляя существующие видео.
         if "link" not in columns:
             conn.execute(
                 "ALTER TABLE videos ADD COLUMN link TEXT NOT NULL DEFAULT ''"
@@ -85,7 +86,6 @@ def init_db():
                 "ALTER TABLE videos ADD COLUMN keywords TEXT DEFAULT ''"
             )
 
-        # Переносим старые ссылки между url и link, если одна из них пуста.
         conn.execute("""
             UPDATE videos
             SET link = url
@@ -106,7 +106,7 @@ def is_admin(user_id):
 
 
 def main_keyboard():
-    buttons = [
+    return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🟥 Присед", callback_data="cat:squat"),
             InlineKeyboardButton("🟦 Жим", callback_data="cat:bench"),
@@ -135,18 +135,53 @@ def main_keyboard():
             InlineKeyboardButton("🔎 Поиск", callback_data="search"),
             InlineKeyboardButton("⭐ Избранное", callback_data="favorites"),
         ],
-    ]
-    return InlineKeyboardMarkup(buttons)
+    ])
+
+
+def youtube_video_id(link):
+    """Извлекает ID ролика из распространённых ссылок YouTube."""
+    match = re.search(
+        r"(?:youtu\.be/|youtube\.com/(?:watch\?v=|embed/|shorts/))"
+        r"([A-Za-z0-9_-]{11})",
+        link,
+    )
+    return match.group(1) if match else None
+
+
+def get_thumbnail(video_id):
+    """Проверяет, доступна ли миниатюра YouTube."""
+    if not video_id:
+        return None
+
+    for quality in ("maxresdefault", "hqdefault"):
+        url = (
+            f"https://img.youtube.com/vi/{video_id}/{quality}.jpg"
+        )
+        try:
+            request = Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            with urlopen(request, timeout=5) as response:
+                image_data = response.read()
+
+            if image_data and len(image_data) > 1000:
+                return image_data
+        except Exception:
+            logging.warning(
+                "Не удалось получить превью YouTube (%s)",
+                quality,
+            )
+
+    return None
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
+    await update.message.reply_text(
         "🏋️ POWERLIB — библиотека видео о пауэрлифтинге\n\n"
         "Выбирай раздел, чтобы найти нужные материалы.\n"
-        "Для поиска нажми «🔎 Поиск» и отправь ключевое слово."
-    )
-    await update.message.reply_text(
-        text, reply_markup=main_keyboard()
+        "Для поиска нажми «🔎 Поиск» и отправь ключевое слово.",
+        reply_markup=main_keyboard(),
     )
 
 
@@ -214,6 +249,54 @@ async def show_video_list(
     )
 
 
+async def send_video_details(query, video, favorite):
+    link = (video["link"] or video["url"] or "").strip()
+    text = (
+        f"🎬 {video['title']}\n\n"
+        f"{video['description']}\n\n"
+        f"📂 Раздел: "
+        f"{CATEGORIES.get(video['category'], video['category'])}\n"
+        f"⏱ Длительность: {video['duration'] or 'не указана'}\n\n"
+        f"▶️ Смотреть: {link or 'ссылка не указана'}"
+    )
+
+    label = (
+        "⭐ Убрать из избранного"
+        if favorite
+        else "⭐ В избранное"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                label, callback_data=f"fav:{video['id']}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🏠 Главное меню", callback_data="home"
+            )
+        ],
+    ])
+
+    video_id = youtube_video_id(link)
+    thumbnail = await __import__("asyncio").to_thread(
+        get_thumbnail, video_id
+    ) if video_id else None
+
+    if thumbnail:
+        await query.message.reply_photo(
+            photo=thumbnail,
+            caption=text[:1024],
+            reply_markup=keyboard,
+        )
+    else:
+        await query.message.reply_text(
+            text,
+            reply_markup=keyboard,
+            disable_web_page_preview=False,
+        )
+
+
 async def button_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
@@ -223,14 +306,12 @@ async def button_handler(
 
     if data == "home":
         await query.message.reply_text(
-            "🏋️ Главное меню",
-            reply_markup=main_keyboard(),
+            "🏋️ Главное меню", reply_markup=main_keyboard()
         )
 
     elif data.startswith("cat:"):
-        category = data.split(":", 1)[1]
         await show_video_list(
-            query, context, category=category
+            query, context, category=data.split(":", 1)[1]
         )
 
     elif data == "search":
@@ -252,7 +333,6 @@ async def button_handler(
                 "SELECT * FROM videos WHERE id=?",
                 (video_id,),
             ).fetchone()
-
             favorite = conn.execute(
                 "SELECT 1 FROM favorites "
                 "WHERE user_id=? AND video_id=?",
@@ -263,39 +343,7 @@ async def button_handler(
             await query.message.reply_text("Видео не найдено.")
             return
 
-        link = video["link"] or video["url"] or "ссылка не указана"
-
-        text = (
-            f"🎬 {video['title']}\n\n"
-            f"{video['description']}\n\n"
-            f"📂 Раздел: "
-            f"{CATEGORIES.get(video['category'], video['category'])}\n"
-            f"⏱ Длительность: {video['duration'] or 'не указана'}\n\n"
-            f"▶️ Смотреть: {link}"
-        )
-
-        label = (
-            "⭐ Убрать из избранного"
-            if favorite
-            else "⭐ В избранное"
-        )
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    label, callback_data=f"fav:{video_id}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🏠 Главное меню", callback_data="home"
-                )
-            ],
-        ]
-
-        await query.message.reply_text(
-            text, reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await send_video_details(query, video, favorite)
 
     elif data.startswith("fav:"):
         video_id = int(data.split(":", 1)[1])
@@ -325,10 +373,6 @@ async def button_handler(
 
         await query.message.reply_text(message)
 
-    elif data == "add_cancel":
-        context.user_data.pop("add_video", None)
-        await query.message.reply_text("Добавление отменено.")
-
 
 async def addvideo(
     update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -340,7 +384,6 @@ async def addvideo(
         return
 
     context.user_data["add_video"] = {"step": "title"}
-
     await update.message.reply_text(
         "Добавление видео.\n\n"
         "Шаг 1/6: отправь название видео.\n"
@@ -429,12 +472,12 @@ async def text_handler(
     elif step == "description":
         state["description"] = text
         state["step"] = "category"
-        categories_text = "\n".join(
-            f"{key} — {value}"
-            for key, value in CATEGORIES.items()
-        )
         await update.message.reply_text(
-            "Шаг 3/6: отправь код раздела:\n\n" + categories_text
+            "Шаг 3/6: отправь код раздела:\n\n"
+            + "\n".join(
+                f"{key} — {value}"
+                for key, value in CATEGORIES.items()
+            )
         )
 
     elif step == "category":
@@ -490,19 +533,16 @@ async def text_handler(
                     state["link"],
                     state["keywords"],
                 ))
-
         except sqlite3.Error:
-            logging.exception("Не удалось сохранить видео в базу данных")
+            logging.exception("Ошибка сохранения видео")
             await update.message.reply_text(
                 "❌ Не удалось сохранить видео. "
-                "Ошибка записана в журнал FadeHost. "
-                "Данные не удалены — попробуй позже."
+                "Проверь Console на FadeHost."
             )
             return
 
         title = state["title"]
         context.user_data.pop("add_video", None)
-
         await update.message.reply_text(
             f"✅ Видео «{title}» добавлено в POWERLIB!",
             reply_markup=main_keyboard(),
@@ -522,12 +562,10 @@ async def help_command(
 def main():
     if not TOKEN:
         raise RuntimeError("Не задан BOT_TOKEN в переменных окружения.")
-
     if not ADMIN_ID:
         raise RuntimeError("Не задан ADMIN_ID в переменных окружения.")
 
     init_db()
-
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -545,3 +583,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
