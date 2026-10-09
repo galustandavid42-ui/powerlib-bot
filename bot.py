@@ -65,6 +65,7 @@ def init_db():
             conn.execute("ALTER TABLE videos ADD COLUMN keywords TEXT DEFAULT ''")
 
 
+
 def init_db():
     with db() as conn:
         conn.execute("""
