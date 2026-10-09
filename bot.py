@@ -334,13 +334,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif step == "keywords":
         state["keywords"] = "" if text == "—" else text
         with db() as conn:
-            conn.execute("""
-                INSERT INTO videos(title, description, category, duration, link, keywords)
-                VALUES(?,?,?,?,?,?)
-            """, (
-                state["title"], state["description"], state["category"],
-                state["duration"], state["link"], state["keywords"]
-            ))
+            
+        conn.execute("""
+            INSERT INTO videos
+                (title, description, category, duration, link, keywords, url)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            state["title"],
+            state["description"],
+            state["category"],
+            state["duration"],
+            state["link"],
+            state["keywords"],
+            state["link"]
+        ))
         title = state["title"]
         context.user_data.pop("add_video", None)
         await update.message.reply_text(
