@@ -54,6 +54,17 @@ def init_db():
             )
         """)
 
+    with db() as conn:
+        columns = [
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(videos)").fetchall()
+        ]
+        if "link" not in columns:
+            conn.execute("ALTER TABLE videos ADD COLUMN link TEXT NOT NULL DEFAULT ''")
+        if "keywords" not in columns:
+            conn.execute("ALTER TABLE videos ADD COLUMN keywords TEXT DEFAULT ''")
+
+
 def is_admin(user_id):
     return ADMIN_ID and str(user_id) == ADMIN_ID
 
