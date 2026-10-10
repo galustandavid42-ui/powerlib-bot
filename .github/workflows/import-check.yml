@@ -1,0 +1,32 @@
+
+name: Check POWERLIB imports
+
+on:
+  push:
+    branches:
+      - modular-refactor
+
+jobs:
+  import-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check imports
+        run: |
+          python -c "from handlers.config import validate_config"
+          python -c "from handlers.database import db, init_db"
+          python -c "from handlers.categories import CATEGORIES"
+          python -c "from modules.keyboards import main_keyboard, navigation_keyboard"
+          python -c "import bot"
+          echo "All imports passed"
