@@ -7,6 +7,12 @@ import asyncio
 from urllib.request import Request, urlopen
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+
+from modules.keyboards import (
+    main_keyboard as modular_main_keyboard,
+    navigation_keyboard as modular_navigation_keyboard,
+)
+
 from telegram.ext import (
     Application,
     CommandHandler,
