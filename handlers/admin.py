@@ -1,4 +1,3 @@
-```python
 import logging
 import sqlite3
 
@@ -146,4 +145,4 @@ async def handle_admin_text(
         )
 
     return True
-```
+
