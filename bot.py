@@ -3,10 +3,9 @@ import asyncio
 import logging
 import re
 import sqlite3
+import json
 from urllib.request import Request, urlopen
-from urllib.parse import urlparse, parse_qs
-
-import yt_dlp
+from urllib.parse import urlparse, parse_qs, quote
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -227,23 +226,30 @@ IMPORT_CATEGORY_KEYWORDS = {
 
 
 def normalize_youtube_url(url):
-    url = url.strip()
+    """Проверяет ссылку и приводит поддерживаемые форматы YouTube к одному виду."""
+    url = url.strip().rstrip(".,;)]}")
+    if not url.startswith(("https://", "http://")):
+        url = "https://" + url
+
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
-
-    if host not in (
-        "youtube.com",
-        "www.youtube.com",
-        "m.youtube.com",
-        "youtu.be",
-        "www.youtu.be",
-    ):
+    allowed_hosts = {
+        "youtube.com", "www.youtube.com", "m.youtube.com",
+        "youtu.be", "www.youtu.be", "youtube-nocookie.com",
+        "www.youtube-nocookie.com",
+    }
+    if host not in allowed_hosts:
         return None
 
+    video_id = ""
     if host.endswith("youtu.be"):
         video_id = parsed.path.strip("/").split("/")[0]
     else:
         video_id = parse_qs(parsed.query).get("v", [""])[0]
+        if not video_id:
+            parts = [part for part in parsed.path.split("/") if part]
+            if len(parts) >= 2 and parts[0] in ("shorts", "embed", "live", "v"):
+                video_id = parts[1]
 
     if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
         return None
@@ -260,16 +266,19 @@ def choose_import_category(title, description):
 
 
 def get_import_video_info(url):
-    options = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "noplaylist": True,
-        "socket_timeout": 15,
-        "retries": 1,
-    }
-    with yt_dlp.YoutubeDL(options) as ydl:
-        return ydl.extract_info(url, download=False)
+    """Получает публичные метаданные через oEmbed; не требует входа в аккаунт."""
+    request_url = (
+        "https://www.youtube.com/oembed?url="
+        + quote(url, safe="")
+        + "&format=json"
+    )
+    request = Request(
+        request_url,
+        headers={"User-Agent": "Mozilla/5.0 POWERLIB video catalog"},
+    )
+    with urlopen(request, timeout=8) as response:
+        data = response.read().decode("utf-8")
+    return json.loads(data)
 
 
 async def import_videos(message, links):
@@ -278,29 +287,43 @@ async def import_videos(message, links):
     for raw_url in links[:MAX_IMPORT_LINKS]:
         normalized = normalize_youtube_url(raw_url)
         if not normalized:
-            results.append(f"❌ Некорректная ссылка: {raw_url}")
+            results.append(f"❌ Не распознал ссылку YouTube: {raw_url}")
             continue
 
+        video_id = parse_qs(urlparse(normalized).query).get("v", [""])[0]
+        metadata_available = False
+        title = f"YouTube-видео ({video_id})"
+        description = (
+            "Метаданные не удалось получить автоматически. "
+            "Откройте видео по ссылке."
+        )
+        duration = ""
+        channel = ""
+
+        # Сначала пробуем получить название и канал без авторизации.
+        # Если YouTube блокирует запрос или видео недоступно, всё равно
+        # сохраняем корректную ссылку в каталог с понятным названием.
         try:
             info = await asyncio.to_thread(get_import_video_info, normalized)
-            title = (info.get("title") or normalized).strip()
-            description = (info.get("description") or "").strip()
-            duration_seconds = info.get("duration")
+            title = (info.get("title") or title).strip()
+            channel = (info.get("author_name") or "").strip()
+            description = (
+                f"Канал: {channel}. Метаданные получены автоматически."
+                if channel
+                else "Название получено автоматически. Откройте видео по ссылке."
+            )
+            metadata_available = True
+        except Exception as exc:
+            logging.warning(
+                "Не удалось получить публичные метаданные для %s: %s. "
+                "Сохраняю ссылку без метаданных.",
+                normalized,
+                exc,
+            )
 
-            if duration_seconds is None:
-                duration = ""
-            else:
-                minutes, seconds = divmod(int(duration_seconds), 60)
-                hours, minutes = divmod(minutes, 60)
-                duration = (
-                    f"{hours}:{minutes:02}:{seconds:02}"
-                    if hours
-                    else f"{minutes}:{seconds:02}"
-                )
+        category = choose_import_category(title, description)
 
-            category = choose_import_category(title, description)
-            channel = info.get("channel") or info.get("uploader") or ""
-
+        try:
             with db() as conn:
                 existing = conn.execute(
                     "SELECT id FROM videos WHERE link = ? OR url = ?",
@@ -324,22 +347,27 @@ async def import_videos(message, links):
                         duration,
                         normalized,
                         normalized,
-                        channel,
+                        channel or ("метаданные получены" if metadata_available else "импорт по ссылке"),
                     ),
                 )
 
+            status = "название получено" if metadata_available else "сохранено по ссылке; метаданные недоступны"
             results.append(
-                f"✅ {title}\n"
+                f"✅ Добавлено: {title}\n"
                 f"Категория: {CATEGORIES.get(category, category)}\n"
-                f"Длительность: {duration or 'не указана'}"
+                f"Длительность: не указана\n"
+                f"Статус: {status}"
             )
 
         except sqlite3.Error:
             logging.exception("Ошибка базы при импорте %s", normalized)
-            results.append(f"❌ Ошибка базы данных: {normalized}")
+            results.append(
+                f"❌ Не удалось сохранить в базу: {normalized}. "
+                "Проверь Console на FadeHost."
+            )
         except Exception:
             logging.exception("Ошибка импорта %s", normalized)
-            results.append(f"❌ Не удалось обработать: {normalized}")
+            results.append(f"❌ Ошибка при сохранении: {normalized}")
 
     if len(links) > MAX_IMPORT_LINKS:
         results.append(f"⚠️ Обработаны первые {MAX_IMPORT_LINKS} ссылок.")
