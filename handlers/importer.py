@@ -1,4 +1,4 @@
-```python
+
 import asyncio
 import logging
 import re
@@ -141,4 +141,4 @@ async def import_videos(message, links):
     await message.reply_text(
         "Результат импорта:\n\n" + "\n\n".join(results)
     )
-```
+
